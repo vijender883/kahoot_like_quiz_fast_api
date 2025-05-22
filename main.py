@@ -22,7 +22,7 @@ app.add_middleware(
 )
 
 # MongoDB connection
-MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
+MONGODB_URL = os.getenv("MONGODB_URL", "mongodb+srv://admin:RCyKhyxEw0LmSSXN@cluster0.rq9f5.mongodb.net/main?retryWrites=true&w=majority&appName=Cluster0")
 client = AsyncIOMotorClient(MONGODB_URL)
 db = client.kahoot_clone
 
