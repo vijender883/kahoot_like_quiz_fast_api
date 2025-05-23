@@ -466,6 +466,7 @@ async def websocket_endpoint(websocket: WebSocket, game_code: str):
                     active_games[game_code] = game
     
     except WebSocketDisconnect:
-        connections[game_code].remove(websocket)
-        if len(connections[game_code]) == 0:
-            del connections
+        if game_code in connections:
+            connections[game_code].remove(websocket)
+            if len(connections[game_code]) == 0:
+                del connections[game_code]  # ✅ Fixed: Delete only this game's connections

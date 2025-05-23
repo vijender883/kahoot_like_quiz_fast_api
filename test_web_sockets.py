@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class KahootWebSocketTester:
-    def __init__(self, base_url: str = "http://localhost:8000", ws_url: str = "ws://localhost:8000"):
+    def __init__(self, base_url: str = "https://practicalsystemdesign.com/api/kahoot", ws_url: str = "wss://practicalsystemdesign.com/api/kahoot"):
         self.base_url = base_url
         self.ws_url = ws_url
         self.game_code: Optional[str] = None
