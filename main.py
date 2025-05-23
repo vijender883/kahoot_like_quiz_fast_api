@@ -253,6 +253,7 @@ async def start_game(game_code: str):
     return {"message": "Game started successfully"}
 
 async def start_question(game_code: str, question_index: int):
+    print(f"Starting question {question_index + 1} for game {game_code}")
     await asyncio.sleep(3)
     
     game = active_games.get(game_code)
@@ -271,6 +272,7 @@ async def start_question(game_code: str, question_index: int):
     active_games[game_code] = game
     await save_game_to_db(game)
     
+    print(f"Broadcasting question {question_index + 1} for game {game_code}")
     await broadcast_to_game(game_code, {
         "type": "question",
         "question_number": question_index + 1,
@@ -281,6 +283,7 @@ async def start_question(game_code: str, question_index: int):
         "time_limit": question.time_limit
     })
     
+    # Start the timer AFTER broadcasting the question
     asyncio.create_task(show_question_results(game_code, question_index))
 
 async def show_question_results(game_code: str, question_index: int):
@@ -289,6 +292,9 @@ async def show_question_results(game_code: str, question_index: int):
         return
     
     question_obj = game.quiz.questions[question_index]
+    
+    print(f"Waiting {question_obj.time_limit} seconds for question {question_index + 1} in game {game_code}")
+    # Wait for the full question time limit
     await asyncio.sleep(question_obj.time_limit)
     
     game = active_games.get(game_code)
@@ -336,6 +342,7 @@ async def show_question_results(game_code: str, question_index: int):
             })
     leaderboard = sorted(leaderboard, key=lambda x: x["score"], reverse=True)[:10]
 
+    print(f"Broadcasting results for question {question_index + 1} in game {game_code}")
     await broadcast_to_game(game_code, {
         "type": "question_results",
         "question_id": question_obj.question_id,
@@ -345,9 +352,15 @@ async def show_question_results(game_code: str, question_index: int):
         "leaderboard": leaderboard
     })
     
+    # Wait a bit before next question so users can see results
+    print(f"Waiting 3 seconds before next question for game {game_code}")
+    await asyncio.sleep(3)
+    
     if question_index + 1 < len(game.quiz.questions):
+        print(f"Starting next question {question_index + 2} for game {game_code}")
         asyncio.create_task(start_question(game_code, question_index + 1))
     else:
+        print(f"Game {game_code} finished, ending game")
         asyncio.create_task(end_game(game_code))
 
 async def end_game(game_code: str):
@@ -447,6 +460,7 @@ async def get_game_status(game_code: str):
 @app.websocket("/ws/{game_code}")
 async def websocket_endpoint(websocket: WebSocket, game_code: str):
     await websocket.accept()
+    print(f"WebSocket connection accepted for game {game_code}")
     
     if game_code not in connections:
         connections[game_code] = []
@@ -464,9 +478,12 @@ async def websocket_endpoint(websocket: WebSocket, game_code: str):
                 if game:
                     game.host_connected = True
                     active_games[game_code] = game
+            elif message.get("type") == "player_connected":
+                print(f"Player connected to game {game_code}: {message.get('player_id')}")
     
     except WebSocketDisconnect:
+        print(f"WebSocket disconnected for game {game_code}")
         if game_code in connections:
             connections[game_code].remove(websocket)
             if len(connections[game_code]) == 0:
-                del connections[game_code]  # ✅ Fixed: Delete only this game's connections
+                del connections[game_code]
