@@ -180,8 +180,8 @@ async def join_game(game_code: str, request: JoinGameRequest):
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     
-    if game.status != GameStatus.WAITING:
-        raise HTTPException(status_code=400, detail="Game already started")
+    # if game.status != GameStatus.WAITING:
+    #     raise HTTPException(status_code=400, detail="Game already started")
     
     user_info = await get_user_info_from_db(request.player_id)
     if not user_info:
