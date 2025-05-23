@@ -467,23 +467,34 @@ async def websocket_endpoint(websocket: WebSocket, game_code: str):
     connections[game_code].append(websocket)
     
     try:
+        # Keep connection alive without blocking
         while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            
-            if message.get("type") == "ping":
-                await websocket.send_text(json.dumps({"type": "pong"}))
-            elif message.get("type") == "host_connected":
-                game = active_games.get(game_code)
-                if game:
-                    game.host_connected = True
-                    active_games[game_code] = game
-            elif message.get("type") == "player_connected":
-                print(f"Player connected to game {game_code}: {message.get('player_id')}")
-    
+            try:
+                # Use wait_for with timeout to avoid blocking indefinitely
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+                message = json.loads(data)
+                
+                if message.get("type") == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+                elif message.get("type") == "host_connected":
+                    game = active_games.get(game_code)
+                    if game:
+                        game.host_connected = True
+                        active_games[game_code] = game
+                elif message.get("type") == "player_connected":
+                    print(f"Player connected to game {game_code}: {message.get('player_id')}")
+                    
+            except asyncio.TimeoutError:
+                # No message received, continue the loop to keep connection alive
+                continue
+                
     except WebSocketDisconnect:
         print(f"WebSocket disconnected for game {game_code}")
-        if game_code in connections:
+    except Exception as e:
+        print(f"WebSocket error for game {game_code}: {e}")
+    finally:
+        # Cleanup connection
+        if game_code in connections and websocket in connections[game_code]:
             connections[game_code].remove(websocket)
             if len(connections[game_code]) == 0:
                 del connections[game_code]
