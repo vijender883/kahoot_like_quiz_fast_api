@@ -79,7 +79,6 @@ class KahootWebSocketTester:
         """Start the game"""
         if not self.game_code:
             raise Exception("No game code available.")
-        
         logger.info(f"Starting game {self.game_code}...")
         response = requests.post(f"{self.base_url}/start-game/{self.game_code}")
         

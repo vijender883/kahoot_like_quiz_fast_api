@@ -1,2 +1,5 @@
 venv
 .env
+test_main.py
+example_payloads_of_api_routers.txt
+add_dummy_user_info_to_mongodb.py
