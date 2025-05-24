@@ -430,8 +430,8 @@ async def proceed_to_next_question(game_code: str, question_index: int):
     })
     
     # Wait briefly to show the correct answer
-    print(f"⏸️ Showing correct answer for 3 seconds for game {game_code}")
-    await asyncio.sleep(3)
+    print(f"⏸️ Showing correct answer for 5 seconds for game {game_code}")
+    await asyncio.sleep(5)
     
     # Check if there are more questions
     if question_index + 1 < len(game.quiz.questions):
