@@ -505,7 +505,7 @@ async def submit_answer(game_code: str, player_id: str, request: SubmitAnswerReq
     
     new_user_answer = UserAnswer(
         question_id=question_obj.question_id,
-        answer=request.submitter_answer,
+        answer=request.submitter_answer -1,  #base 1 to base 0
         is_correct=is_correct,
         time_taken=answer_time,
         score=score_to_add
