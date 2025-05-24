@@ -501,7 +501,9 @@ async def submit_answer(game_code: str, player_id: str, request: SubmitAnswerReq
 
     if is_correct:
         time_bonus = max(0, (question_obj.time_limit - answer_time) / question_obj.time_limit)
-        score_to_add = int(max_score * (0.05 + 0.95 * time_bonus))
+        score_to_add = int(max_score * time_bonus)
+    else:
+        score_to_add = -100
     
     new_user_answer = UserAnswer(
         question_id=question_obj.question_id,
