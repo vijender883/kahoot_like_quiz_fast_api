@@ -399,10 +399,10 @@ async def start_question(game_code: str, question_index: int):
     # Wait to ensure message delivery before starting timer
     await asyncio.sleep(2)
     
-    # Start the results timer
-    asyncio.create_task(show_question_results(game_code, question_index))
+    # Start the next question or end game timer
+    asyncio.create_task(proceed_to_next_question(game_code, question_index))
 
-async def show_question_results(game_code: str, question_index: int):
+async def proceed_to_next_question(game_code: str, question_index: int):
     game = active_games.get(game_code)
     if not game:
         return
@@ -416,64 +416,24 @@ async def show_question_results(game_code: str, question_index: int):
     if not game or game.current_question != question_index:
         return
     
+    # Show correct answer briefly
     game.status = GameStatus.RESULTS
     active_games[game_code] = game
     await save_game_to_db(game)
     
-    # Get results (your existing logic)
-    all_submissions_cursor = db.user_submissions.find({"quiz_code": game_code})
-    all_submissions = await all_submissions_cursor.to_list(length=None)
-    
-    results = []
-    answer_counts = [0] * len(question_obj.options)
-    
-    for submission_data in all_submissions:
-        user_submission = UserSubmission(**submission_data)
-        player_answer_data = user_submission.answers.get(question_obj.question_id)
-        
-        if player_answer_data and player_answer_data.answer is not None:
-            answer_counts[player_answer_data.answer] += 1
-            
-            player_user_info = await get_user_info_from_db(user_submission.player_id)
-            if player_user_info:
-                results.append({
-                    "player_id": user_submission.player_id,
-                    "email_id": player_user_info.email_id,
-                    "name": player_user_info.name,
-                    "answer": player_answer_data.answer,
-                    "is_correct": player_answer_data.is_correct,
-                    "score_added_this_question": player_answer_data.score,
-                    "total_score": user_submission.total_score
-                })
-    
-    leaderboard = []
-    for s in all_submissions:
-        player_user_info = await get_user_info_from_db(s["player_id"])
-        if player_user_info:
-            leaderboard.append({
-                "email_id": player_user_info.email_id,
-                "name": player_user_info.name,
-                "score": s["total_score"]
-            })
-    leaderboard = sorted(leaderboard, key=lambda x: x["score"], reverse=True)[:10]
-
-    results_message = {
+    # Broadcast the correct answer (without leaderboard)
+    await broadcast_to_game(game_code, {
         "type": "question_results",
         "question_id": question_obj.question_id,
         "correct_answer": question_obj.correct_answer,
-        "answer_counts": answer_counts,
-        "results": results,
-        "leaderboard": leaderboard,
         "timestamp": datetime.now().isoformat()
-    }
+    })
     
-    print(f"📊 Broadcasting results for question {question_index + 1} in game {game_code}")
-    await broadcast_to_game(game_code, results_message)
+    # Wait briefly to show the correct answer
+    print(f"⏸️ Showing correct answer for 3 seconds for game {game_code}")
+    await asyncio.sleep(3)
     
-    # Wait before next question
-    print(f"⏸️ Waiting 5 seconds before next question for game {game_code}")
-    await asyncio.sleep(5)
-    
+    # Check if there are more questions
     if question_index + 1 < len(game.quiz.questions):
         print(f"➡️ Starting next question {question_index + 2} for game {game_code}")
         asyncio.create_task(start_question(game_code, question_index + 1))
@@ -482,7 +442,7 @@ async def show_question_results(game_code: str, question_index: int):
         asyncio.create_task(end_game(game_code))
 
 async def end_game(game_code: str):
-    await asyncio.sleep(5)
+    await asyncio.sleep(2)
     
     game = active_games.get(game_code)
     if not game:
@@ -492,6 +452,7 @@ async def end_game(game_code: str):
     active_games[game_code] = game
     await save_game_to_db(game)
     
+    # Get final leaderboard
     final_leaderboard_cursor = db.user_submissions.find({"quiz_code": game_code})
     final_submissions = await final_leaderboard_cursor.to_list(length=None)
 
@@ -506,6 +467,7 @@ async def end_game(game_code: str):
             })
     final_leaderboard = sorted(final_leaderboard, key=lambda x: x["score"], reverse=True)
     
+    # Broadcast final results with leaderboard
     await broadcast_to_game(game_code, {
         "type": "game_finished",
         "final_leaderboard": final_leaderboard,
@@ -539,7 +501,7 @@ async def submit_answer(game_code: str, player_id: str, request: SubmitAnswerReq
 
     if is_correct:
         time_bonus = max(0, (question_obj.time_limit - answer_time) / question_obj.time_limit)
-        score_to_add = int(max_score * (0.5 + 0.5 * time_bonus))
+        score_to_add = int(max_score * (0.05 + 0.95 * time_bonus))
     
     new_user_answer = UserAnswer(
         question_id=question_obj.question_id,
