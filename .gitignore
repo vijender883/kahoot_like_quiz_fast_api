@@ -1,5 +1,21 @@
-venv
+# Virtual environment
+venv/
+
+# Environment variables
 .env
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+
+# Editor settings (optional but common)
+.vscode/
+
+# Test and utility files (already listed by you)
 test_main.py
 example_payloads_of_api_routers.txt
 add_dummy_user_info_to_mongodb.py
+
+# OS-specific files
+.DS_Store
+Thumbs.db

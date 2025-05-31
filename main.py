@@ -11,6 +11,10 @@ import os
 from enum import Enum
 import logging
 import weakref
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = FastAPI(title="Kahoot Clone API")
 
@@ -23,10 +27,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MongoDB connection
-MONGODB_URL = os.getenv("MONGODB_URL", "mongodb+srv://admin:RCyKhyxEw0LmSSXN@cluster0.rq9f.mongodb.net/main?retryWrites=true&w=majority&appName=Cluster0")
+# MongoDB connection - Load from .env file
+MONGODB_URL = os.getenv("MONGODB_URL")
+
+if not MONGODB_URL:
+    raise ValueError("MONGODB_URL environment variable is not set. Please check your .env file.")
+
+print(f"📡 Connecting to MongoDB...")
 client = AsyncIOMotorClient(MONGODB_URL)
 db = client.test
+
+# Test MongoDB connection function
+async def test_mongodb_connection():
+    """Test MongoDB connection before starting the server"""
+    try:
+        # Test connection with a timeout
+        await client.admin.command('ping')
+        print("✅ MongoDB connected successfully")
+        return True
+    except Exception as e:
+        print(f"❌ MongoDB connection failed: {e}")
+        print("Please check your MONGODB_URL in the .env file and cluster status")
+        return False
 
 # Pydantic models
 class GameStatus(str, Enum):
@@ -210,157 +232,212 @@ async def broadcast_to_game(game_code: str, message: dict):
     await connection_manager.broadcast_to_game(game_code, message)
 
 async def save_game_to_db(game: Game):
-    await db.games.replace_one(
-        {"code": game.code}, 
-        game.dict(), 
-        upsert=True
-    )
+    try:
+        await db.games.replace_one(
+            {"code": game.code}, 
+            game.dict(), 
+            upsert=True
+        )
+    except Exception as e:
+        print(f"❌ Failed to save game to database: {e}")
+        raise HTTPException(status_code=500, detail="Database operation failed")
 
 async def get_game_from_db(game_code: str) -> Optional[Game]:
-    game_data = await db.games.find_one({"code": game_code})
-    if game_data:
-        return Game(**game_data)
-    return None
+    try:
+        game_data = await db.games.find_one({"code": game_code})
+        if game_data:
+            return Game(**game_data)
+        return None
+    except Exception as e:
+        print(f"❌ Failed to get game from database: {e}")
+        return None
 
 async def get_user_submission_from_db(quiz_code: str, player_id: str) -> Optional[UserSubmission]:
-    submission_data = await db.user_submissions.find_one({"quiz_code": quiz_code, "player_id": player_id})
-    if submission_data:
-        return UserSubmission(**submission_data)
-    return None
+    try:
+        submission_data = await db.user_submissions.find_one({"quiz_code": quiz_code, "player_id": player_id})
+        if submission_data:
+            return UserSubmission(**submission_data)
+        return None
+    except Exception as e:
+        print(f"❌ Failed to get user submission from database: {e}")
+        return None
 
 async def get_user_info_from_db(player_id: str) -> Optional[UserInfo]:
-    user_data = await db.user_info.find_one({"player_id": player_id})
-    if user_data:
-        return UserInfo(**user_data)
-    return None
+    try:
+        user_data = await db.user_info.find_one({"player_id": player_id})
+        if user_data:
+            return UserInfo(**user_data)
+        return None
+    except Exception as e:
+        print(f"❌ Failed to get user info from database: {e}")
+        return None
+
+# Startup event to test MongoDB connection
+@app.on_event("startup")
+async def startup_event():
+    """Test MongoDB connection on startup"""
+    mongodb_ok = await test_mongodb_connection()
+    if not mongodb_ok:
+        print("⚠️ Server starting without MongoDB connection - some features may not work")
 
 # API Routes
 
 @app.post("/validate-user", response_model=UserValidationResponse)
 async def validate_user(request: UserValidationRequest):
-    user = await db.user_info.find_one({"email_id": request.email_id})
-    
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Check if a player_id is already assigned to this user
-    player_id = user.get("player_id")
-    
-    # If no player_id exists, generate a new one and update the user_info document
-    if not player_id:
-        player_id = str(uuid.uuid4())
-        await db.user_info.update_one(
-            {"_id": user["_id"]},
-            {"$set": {"player_id": player_id}}
-        )
-    
-    return UserValidationResponse(name=user["name"], player_id=player_id)
+    try:
+        user = await db.user_info.find_one({"email_id": request.email_id})
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Check if a player_id is already assigned to this user
+        player_id = user.get("player_id")
+        
+        # If no player_id exists, generate a new one and update the user_info document
+        if not player_id:
+            player_id = str(uuid.uuid4())
+            await db.user_info.update_one(
+                {"_id": user["_id"]},
+                {"$set": {"player_id": player_id}}
+            )
+        
+        return UserValidationResponse(name=user["name"], player_id=player_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error validating user: {e}")
+        raise HTTPException(status_code=500, detail="Database operation failed")
 
 @app.post("/create-quiz")
 async def create_quiz(quiz: Quiz):
-    game_code = generate_game_code()
-    
-    while game_code in active_games or await get_game_from_db(game_code):
+    try:
         game_code = generate_game_code()
-    
-    for q in quiz.questions:
-        q.question_id = str(uuid.uuid4())
+        
+        # Check for duplicate game codes with error handling
+        max_attempts = 10
+        attempts = 0
+        while attempts < max_attempts:
+            if game_code not in active_games:
+                existing_game = await get_game_from_db(game_code)
+                if not existing_game:
+                    break
+            game_code = generate_game_code()
+            attempts += 1
+        
+        if attempts >= max_attempts:
+            raise HTTPException(status_code=500, detail="Failed to generate unique game code")
+        
+        for q in quiz.questions:
+            q.question_id = str(uuid.uuid4())
 
-    game = Game(code=game_code, quiz=quiz)
-    active_games[game_code] = game
-    # Initialize connections for this game (handled by ConnectionManager now)
-    
-    await save_game_to_db(game)
-    
-    return {"game_code": game_code, "message": "Quiz created successfully"}
+        game = Game(code=game_code, quiz=quiz)
+        active_games[game_code] = game
+        
+        await save_game_to_db(game)
+        
+        return {"game_code": game_code, "message": "Quiz created successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error creating quiz: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create quiz")
 
 @app.post("/join-game/{game_code}")
 async def join_game(game_code: str, request: JoinGameRequest):
-    game = active_games.get(game_code) or await get_game_from_db(game_code)
-    
-    if not game:
-        raise HTTPException(status_code=404, detail="Game not found")
-    
-    # if game.status != GameStatus.WAITING:
-    #     raise HTTPException(status_code=400, detail="Game already started")
-    
-    user_info = await get_user_info_from_db(request.player_id)
-    if not user_info:
-        raise HTTPException(status_code=404, detail="Player not found. Please validate user first.")
+    try:
+        game = active_games.get(game_code) or await get_game_from_db(game_code)
+        
+        if not game:
+            raise HTTPException(status_code=404, detail="Game not found")
+        
+        user_info = await get_user_info_from_db(request.player_id)
+        if not user_info:
+            raise HTTPException(status_code=404, detail="Player not found. Please validate user first.")
 
-    existing_submission = await db.user_submissions.find_one({"quiz_code": game_code, "player_id": request.player_id})
-    if existing_submission:
+        existing_submission = await db.user_submissions.find_one({"quiz_code": game_code, "player_id": request.player_id})
+        if existing_submission:
+            return {
+                "player_id": existing_submission["player_id"], 
+                "message": f"Welcome back {user_info.name}! You are already registered for this game."
+            }
+        
+        new_submission = UserSubmission(
+            player_id=request.player_id,
+            quiz_code=game_code,
+            answers={},
+            total_score=0
+        )
+        await db.user_submissions.insert_one(new_submission.dict())
+        
+        all_submissions_cursor = db.user_submissions.find({"quiz_code": game_code})
+        players_in_game = []
+        for s in await all_submissions_cursor.to_list(length=None):
+            player_user_info = await get_user_info_from_db(s["player_id"])
+            if player_user_info:
+                players_in_game.append({
+                    "player_id": s["player_id"],
+                    "email_id": player_user_info.email_id,
+                    "name": player_user_info.name
+                })
+
+        await broadcast_to_game(game_code, {
+            "type": "player_joined",
+            "players": players_in_game,
+            "total_players": len(players_in_game)
+        })
+        
         return {
-            "player_id": existing_submission["player_id"], 
-            "message": f"Welcome back {user_info.name}! You are already registered for this game."
+            "player_id": request.player_id, 
+            "message": f"Welcome {user_info.name}! You have successfully joined the game."
         }
-    
-    new_submission = UserSubmission(
-        player_id=request.player_id,
-        quiz_code=game_code,
-        answers={},
-        total_score=0
-    )
-    await db.user_submissions.insert_one(new_submission.dict())
-    
-    all_submissions_cursor = db.user_submissions.find({"quiz_code": game_code})
-    players_in_game = []
-    for s in await all_submissions_cursor.to_list(length=None):
-        player_user_info = await get_user_info_from_db(s["player_id"])
-        if player_user_info:
-            players_in_game.append({
-                "player_id": s["player_id"],
-                "email_id": player_user_info.email_id,
-                "name": player_user_info.name
-            })
-
-    await broadcast_to_game(game_code, {
-        "type": "player_joined",
-        "players": players_in_game,
-        "total_players": len(players_in_game)
-    })
-    
-    return {
-        "player_id": request.player_id, 
-        "message": f"Welcome {user_info.name}! You have successfully joined the game."
-    }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error joining game: {e}")
+        raise HTTPException(status_code=500, detail="Failed to join game")
 
 @app.post("/start-game/{game_code}")
 async def start_game(game_code: str):
-    game = active_games.get(game_code) or await get_game_from_db(game_code)
-    
-    if not game:
-        raise HTTPException(status_code=404, detail="Game not found")
-    
-    if game.status != GameStatus.WAITING:
-        raise HTTPException(status_code=400, detail="Game already started")
-    
-    players_count = await db.user_submissions.count_documents({"quiz_code": game_code})
-    if players_count == 0:
-        raise HTTPException(status_code=400, detail="No players in game")
-    
-    # Verify we have active connections
-    connection_count = connection_manager.get_connection_count(game_code)
-    print(f"Starting game {game_code} with {connection_count} active connections")
-    
-    game.status = GameStatus.STARTED
-    game.current_question = 0
-    active_games[game_code] = game
-    await save_game_to_db(game)
-    
-    # Robust broadcast with verification
-    await broadcast_to_game(game_code, {
-        "type": "game_started",
-        "message": "Game is starting!",
-        "timestamp": datetime.now().isoformat()
-    })
-    
-    # Wait a bit to ensure message is delivered
-    await asyncio.sleep(1)
-    
-    asyncio.create_task(start_question(game_code, 0))
-    
-    return {"message": "Game started successfully", "connections": connection_count}
+    try:
+        game = active_games.get(game_code) or await get_game_from_db(game_code)
+        
+        if not game:
+            raise HTTPException(status_code=404, detail="Game not found")
+        
+        if game.status != GameStatus.WAITING:
+            raise HTTPException(status_code=400, detail="Game already started")
+        
+        players_count = await db.user_submissions.count_documents({"quiz_code": game_code})
+        if players_count == 0:
+            raise HTTPException(status_code=400, detail="No players in game")
+        
+        # Verify we have active connections
+        connection_count = connection_manager.get_connection_count(game_code)
+        print(f"Starting game {game_code} with {connection_count} active connections")
+        
+        game.status = GameStatus.STARTED
+        game.current_question = 0
+        active_games[game_code] = game
+        await save_game_to_db(game)
+        
+        # Robust broadcast with verification
+        await broadcast_to_game(game_code, {
+            "type": "game_started",
+            "message": "Game is starting!",
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Wait a bit to ensure message is delivered
+        await asyncio.sleep(1)
+        
+        asyncio.create_task(start_question(game_code, 0))
+        
+        return {"message": "Game started successfully", "connections": connection_count}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error starting game: {e}")
+        raise HTTPException(status_code=500, detail="Failed to start game")
 
 async def start_question(game_code: str, question_index: int):
     print(f"🎯 Starting question {question_index + 1} for game {game_code}")
@@ -390,6 +467,7 @@ async def start_question(game_code: str, question_index: int):
         "question": question.question,
         "options": question.options,
         "time_limit": question.time_limit,
+        "correct_answer": question.correct_answer,
         "timestamp": datetime.now().isoformat()
     }
     
@@ -452,92 +530,107 @@ async def end_game(game_code: str):
     active_games[game_code] = game
     await save_game_to_db(game)
     
-    # Get final leaderboard
-    final_leaderboard_cursor = db.user_submissions.find({"quiz_code": game_code})
-    final_submissions = await final_leaderboard_cursor.to_list(length=None)
+    try:
+        # Get final leaderboard
+        final_leaderboard_cursor = db.user_submissions.find({"quiz_code": game_code})
+        final_submissions = await final_leaderboard_cursor.to_list(length=None)
 
-    final_leaderboard = []
-    for s in final_submissions:
-        player_user_info = await get_user_info_from_db(s["player_id"])
-        if player_user_info:
-            final_leaderboard.append({
-                "email_id": player_user_info.email_id,
-                "name": player_user_info.name,
-                "score": s["total_score"]
-            })
-    final_leaderboard = sorted(final_leaderboard, key=lambda x: x["score"], reverse=True)
-    
-    # Broadcast final results with leaderboard
-    await broadcast_to_game(game_code, {
-        "type": "game_finished",
-        "final_leaderboard": final_leaderboard,
-        "timestamp": datetime.now().isoformat()
-    })
+        final_leaderboard = []
+        for s in final_submissions:
+            player_user_info = await get_user_info_from_db(s["player_id"])
+            if player_user_info:
+                final_leaderboard.append({
+                    "email_id": player_user_info.email_id,
+                    "name": player_user_info.name,
+                    "score": s["total_score"]
+                })
+        final_leaderboard = sorted(final_leaderboard, key=lambda x: x["score"], reverse=True)
+        
+        # Broadcast final results with leaderboard
+        await broadcast_to_game(game_code, {
+            "type": "game_finished",
+            "final_leaderboard": final_leaderboard,
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        print(f"❌ Error ending game: {e}")
 
 @app.post("/submit-answer/{game_code}/{player_id}")
 async def submit_answer(game_code: str, player_id: str, request: SubmitAnswerRequest):
-    game = active_games.get(game_code)
-    if not game:
-        raise HTTPException(status_code=404, detail="Game not found")
-    
-    if game.status != GameStatus.QUESTION:
-        raise HTTPException(status_code=400, detail="Not accepting answers right now")
-    
-    question_index = game.current_question
-    question_obj = game.quiz.questions[question_index]
-    
-    user_submission = await get_user_submission_from_db(game_code, player_id)
-    if not user_submission:
-        raise HTTPException(status_code=404, detail="Player submission not found. Please join the game first.")
-    
-    if question_obj.question_id in user_submission.answers:
-        raise HTTPException(status_code=400, detail="Answer already submitted for this question")
-    
-    answer_time = request.time_taken
-    
-    is_correct = (request.submitter_answer == question_obj.correct_answer)
-    score_to_add = 0
-    max_score = 1000
+    try:
+        game = active_games.get(game_code)
+        if not game:
+            raise HTTPException(status_code=404, detail="Game not found")
+        
+        if game.status != GameStatus.QUESTION:
+            raise HTTPException(status_code=400, detail="Not accepting answers right now")
+        
+        question_index = game.current_question
+        question_obj = game.quiz.questions[question_index]
+        
+        user_submission = await get_user_submission_from_db(game_code, player_id)
+        if not user_submission:
+            raise HTTPException(status_code=404, detail="Player submission not found. Please join the game first.")
+        
+        if question_obj.question_id in user_submission.answers:
+            raise HTTPException(status_code=400, detail="Answer already submitted for this question")
+        
+        answer_time = request.time_taken
+        
+        is_correct = (request.submitter_answer == question_obj.correct_answer)
+        score_to_add = 0
+        max_score = 1000
 
-    if is_correct:
-        time_bonus = max(0, (question_obj.time_limit - answer_time) / question_obj.time_limit)
-        score_to_add = int(max_score * time_bonus)
-    else:
-        score_to_add = -100
-    
-    new_user_answer = UserAnswer(
-        question_id=question_obj.question_id,
-        answer=request.submitter_answer,
-        is_correct=is_correct,
-        time_taken=answer_time,
-        score=score_to_add
-    )
-    
-    user_submission.answers[question_obj.question_id] = new_user_answer
-    user_submission.total_score += score_to_add
-    
-    await db.user_submissions.replace_one(
-        {"quiz_code": game_code, "player_id": player_id},
-        user_submission.dict(),
-        upsert=True
-    )
-    
-    return {"message": "Answer submitted successfully", "score_added": score_to_add}
+        if is_correct:
+            time_bonus = max(0, (question_obj.time_limit - answer_time) / question_obj.time_limit)
+            score_to_add = int(max_score * time_bonus)
+        else:
+            score_to_add = -100
+        
+        new_user_answer = UserAnswer(
+            question_id=question_obj.question_id,
+            answer=request.submitter_answer,
+            is_correct=is_correct,
+            time_taken=answer_time,
+            score=score_to_add
+        )
+        
+        user_submission.answers[question_obj.question_id] = new_user_answer
+        user_submission.total_score += score_to_add
+        
+        await db.user_submissions.replace_one(
+            {"quiz_code": game_code, "player_id": player_id},
+            user_submission.dict(),
+            upsert=True
+        )
+        
+        return {"message": "Answer submitted successfully", "score_added": score_to_add}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error submitting answer: {e}")
+        raise HTTPException(status_code=500, detail="Failed to submit answer")
 
 @app.get("/game-status/{game_code}")
 async def get_game_status(game_code: str):
-    game = active_games.get(game_code) or await get_game_from_db(game_code)
-    if not game:
-        raise HTTPException(status_code=404, detail="Game not found")
-    
-    players_count = await db.user_submissions.count_documents({"quiz_code": game_code})
+    try:
+        game = active_games.get(game_code) or await get_game_from_db(game_code)
+        if not game:
+            raise HTTPException(status_code=404, detail="Game not found")
+        
+        players_count = await db.user_submissions.count_documents({"quiz_code": game_code})
 
-    return {
-        "status": game.status,
-        "current_question": game.current_question,
-        "total_questions": len(game.quiz.questions),
-        "players_count": players_count
-    }
+        return {
+            "status": game.status,
+            "current_question": game.current_question,
+            "total_questions": len(game.quiz.questions),
+            "players_count": players_count
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error getting game status: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get game status")
 
 # Bulletproof WebSocket endpoint
 @app.websocket("/ws/{game_code}")
