@@ -604,7 +604,7 @@ async def submit_answer(game_code: str, player_id: str, request: SubmitAnswerReq
             upsert=True
         )
         
-        return {"message": "Answer submitted successfully", "score_added": score_to_add}
+        return {"message": "Answer submitted successfully", "score_added": score_to_add, "is_correct": is_correct}
     except HTTPException:
         raise
     except Exception as e:
@@ -641,9 +641,14 @@ async def websocket_endpoint(websocket: WebSocket, game_code: str):
         # Connect with full error handling
         await connection_manager.connect(websocket, game_code)
         
-        # Message handling loop with robust error recovery
+        # Message handling loop with proper disconnect handling
         while True:
             try:
+                # Check if websocket is still connected before trying to receive
+                if websocket.client_state == WebSocketState.DISCONNECTED:
+                    print(f"WebSocket already disconnected for game {game_code}")
+                    break
+                
                 # Wait for message with timeout
                 data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
                 message = json.loads(data)
@@ -651,7 +656,8 @@ async def websocket_endpoint(websocket: WebSocket, game_code: str):
                 # Handle different message types
                 if message.get("type") == "ping":
                     try:
-                        await websocket.send_text(json.dumps({"type": "pong"}))
+                        if websocket.client_state == WebSocketState.CONNECTED:
+                            await websocket.send_text(json.dumps({"type": "pong"}))
                     except Exception as e:
                         print(f"Failed to send pong: {e}")
                         break
@@ -675,13 +681,31 @@ async def websocket_endpoint(websocket: WebSocket, game_code: str):
                     
                     # Send immediate confirmation
                     try:
-                        await websocket.send_text(json.dumps({
-                            "type": "connection_confirmed",
-                            "message": "Successfully connected to game",
-                            "game_code": game_code
-                        }))
+                        if websocket.client_state == WebSocketState.CONNECTED:
+                            await websocket.send_text(json.dumps({
+                                "type": "connection_confirmed",
+                                "message": "Successfully connected to game",
+                                "game_code": game_code
+                            }))
                     except Exception as e:
                         print(f"Failed to send confirmation: {e}")
+                        break
+                    
+                    # Broadcast updated player count to all connections
+                    try:
+                        players_count = await db.user_submissions.count_documents({"quiz_code": game_code})
+                        await broadcast_to_game(game_code, {
+                            "type": "player_count_update",
+                            "total_players": players_count,
+                            "timestamp": datetime.now().isoformat()
+                        })
+                    except Exception as e:
+                        print(f"Failed to broadcast player count: {e}")
+                
+            except WebSocketDisconnect:
+                # Client disconnected - break immediately
+                print(f"WebSocket disconnected (WebSocketDisconnect) for game {game_code}")
+                break
                 
             except asyncio.TimeoutError:
                 # Timeout is normal - continue loop
@@ -691,16 +715,28 @@ async def websocket_endpoint(websocket: WebSocket, game_code: str):
                 print(f"Invalid JSON received: {e}")
                 continue
                 
+            except ConnectionClosedError:
+                # Connection closed unexpectedly
+                print(f"WebSocket connection closed unexpectedly for game {game_code}")
+                break
+                
             except Exception as e:
-                print(f"Error processing message: {e}")
-                continue
+                # For any other exception, check if it's connection-related
+                error_str = str(e).lower()
+                if any(keyword in error_str for keyword in ['disconnect', 'closed', 'connection']):
+                    print(f"Connection-related error for game {game_code}: {e}")
+                    break
+                else:
+                    print(f"Non-connection error processing message: {e}")
+                    continue
                 
     except WebSocketDisconnect:
-        print(f"WebSocket disconnected normally for game {game_code}")
+        print(f"WebSocket disconnected during initial connection for game {game_code}")
         
     except Exception as e:
         print(f"Unexpected WebSocket error for game {game_code}: {e}")
         
     finally:
         # Always clean up the connection
+        print(f"Cleaning up WebSocket connection for game {game_code}")
         await connection_manager.disconnect(websocket)
