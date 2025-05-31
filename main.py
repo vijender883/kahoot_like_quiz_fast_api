@@ -76,6 +76,7 @@ class Game(BaseModel):
     current_question: int = 0
     question_start_time: Optional[datetime] = None
     host_connected: bool = False
+    finished_at: Optional[datetime] = None
 
 class UserAnswer(BaseModel):
     question_id: str
@@ -121,33 +122,46 @@ class UserRegistrationResponse(BaseModel):
     name: str
     player_id: str
 
-# Enhanced connection tracking
+# Enhanced connection tracking with better monitoring
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, List[WebSocket]] = {}
         self.connection_metadata: Dict[WebSocket, Dict] = {}
         self.heartbeat_tasks: Dict[WebSocket, asyncio.Task] = {}
+        self.stats = {
+            "total_connections": 0,
+            "failed_connections": 0,
+            "reconnections": 0
+        }
     
     async def connect(self, websocket: WebSocket, game_code: str, player_id: str = None):
-        await websocket.accept()
-        
-        if game_code not in self.active_connections:
-            self.active_connections[game_code] = []
-        
-        self.active_connections[game_code].append(websocket)
-        self.connection_metadata[websocket] = {
-            "game_code": game_code,
-            "player_id": player_id,
-            "connected_at": datetime.now(),
-            "last_ping": datetime.now()
-        }
-        
-        # Start heartbeat for this connection
-        self.heartbeat_tasks[websocket] = asyncio.create_task(
-            self._heartbeat_monitor(websocket)
-        )
-        
-        print(f"✅ WebSocket connected to game {game_code}. Total connections: {len(self.active_connections[game_code])}")
+        try:
+            await websocket.accept()
+            
+            if game_code not in self.active_connections:
+                self.active_connections[game_code] = []
+            
+            self.active_connections[game_code].append(websocket)
+            self.connection_metadata[websocket] = {
+                "game_code": game_code,
+                "player_id": player_id,
+                "connected_at": datetime.now(),
+                "last_ping": datetime.now()
+            }
+            
+            # Start heartbeat for this connection
+            self.heartbeat_tasks[websocket] = asyncio.create_task(
+                self._heartbeat_monitor(websocket)
+            )
+            
+            self.stats["total_connections"] += 1
+            
+            print(f"✅ WebSocket connected to game {game_code}. Total connections: {len(self.active_connections[game_code])}")
+            
+        except Exception as e:
+            self.stats["failed_connections"] += 1
+            print(f"❌ Failed to connect WebSocket: {e}")
+            raise
     
     async def disconnect(self, websocket: WebSocket):
         # Cancel heartbeat task
@@ -170,10 +184,10 @@ class ConnectionManager:
         print(f"❌ WebSocket disconnected from game {game_code}")
     
     async def _heartbeat_monitor(self, websocket: WebSocket):
-        """Monitor connection health"""
+        """Monitor connection health with more frequent pings"""
         try:
             while True:
-                await asyncio.sleep(30)  # Check every 30 seconds
+                await asyncio.sleep(15)  # Check every 15 seconds for better reliability
                 try:
                     await websocket.send_text(json.dumps({"type": "heartbeat"}))
                     self.connection_metadata[websocket]["last_ping"] = datetime.now()
@@ -184,7 +198,7 @@ class ConnectionManager:
             pass
     
     async def broadcast_to_game(self, game_code: str, message: dict):
-        """Ultra-robust broadcast with multiple retry attempts"""
+        """Ultra-robust broadcast with multiple retry attempts and state recovery"""
         if game_code not in self.active_connections:
             print(f"⚠️ No connections found for game {game_code}")
             return
@@ -196,9 +210,9 @@ class ConnectionManager:
         
         print(f"📡 Broadcasting to {len(connections)} connections for game {game_code}")
         
-        # First attempt - send to all connections
+        # First attempt - send to all connections with aggressive retry
         for websocket in connections:
-            success = await self._send_with_retries(websocket, message_json, max_retries=3)
+            success = await self._send_with_retries(websocket, message_json, max_retries=5)
             if success:
                 successful_sends += 1
             else:
@@ -209,16 +223,20 @@ class ConnectionManager:
             await self.disconnect(failed_ws)
         
         print(f"✅ Broadcast complete: {successful_sends} successful, {len(failed_connections)} failed")
+        
+        # If we have very few successful connections, log a warning
+        if successful_sends < len(connections) * 0.5:  # Less than 50% success rate
+            print(f"⚠️ Low broadcast success rate for game {game_code}: {successful_sends}/{len(connections)}")
     
-    async def _send_with_retries(self, websocket: WebSocket, message: str, max_retries: int = 3):
-        """Send message with exponential backoff retries"""
+    async def _send_with_retries(self, websocket: WebSocket, message: str, max_retries: int = 5):
+        """Send message with exponential backoff retries - more aggressive for reliability"""
         for attempt in range(max_retries):
             try:
                 await websocket.send_text(message)
                 return True
             except Exception as e:
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(0.1 * (2 ** attempt))  # Exponential backoff
+                    await asyncio.sleep(0.05 * (2 ** attempt))  # Faster retries
                     continue
                 else:
                     print(f"❌ Failed to send after {max_retries} attempts: {e}")
@@ -227,6 +245,15 @@ class ConnectionManager:
     
     def get_connection_count(self, game_code: str) -> int:
         return len(self.active_connections.get(game_code, []))
+    
+    def get_stats(self):
+        """Get connection statistics"""
+        active_count = sum(len(conns) for conns in self.active_connections.values())
+        return {
+            **self.stats,
+            "active_connections": active_count,
+            "active_games_with_connections": len(self.active_connections)
+        }
 
 # Global connection manager
 connection_manager = ConnectionManager()
@@ -240,6 +267,20 @@ def generate_game_code() -> str:
 
 async def broadcast_to_game(game_code: str, message: dict):
     await connection_manager.broadcast_to_game(game_code, message)
+
+async def safe_broadcast_to_game(game_code: str, message: dict, max_retries: int = 3):
+    """Safe broadcast with retry logic for critical messages"""
+    for attempt in range(max_retries):
+        try:
+            await connection_manager.broadcast_to_game(game_code, message)
+            return True
+        except Exception as e:
+            print(f"❌ Broadcast attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)  # Wait before retry
+    
+    print(f"❌ Failed to broadcast to game {game_code} after {max_retries} attempts")
+    return False
 
 async def save_game_to_db(game: Game):
     try:
@@ -262,6 +303,20 @@ async def get_game_from_db(game_code: str) -> Optional[Game]:
         print(f"❌ Failed to get game from database: {e}")
         return None
 
+async def ensure_game_in_memory(game_code: str) -> Optional[Game]:
+    """Ensure game is loaded in memory, fetch from DB if needed - CRITICAL FOR RELIABILITY"""
+    if game_code in active_games:
+        return active_games[game_code]
+    
+    # Try to load from database
+    game = await get_game_from_db(game_code)
+    if game:
+        active_games[game_code] = game
+        print(f"🔄 Loaded game {game_code} from database into memory")
+        return game
+    
+    return None
+
 async def get_user_submission_from_db(quiz_code: str, player_id: str) -> Optional[UserSubmission]:
     try:
         submission_data = await db.user_submissions.find_one({"quiz_code": quiz_code, "player_id": player_id})
@@ -282,13 +337,124 @@ async def get_user_info_from_db(player_id: str) -> Optional[UserInfo]:
         print(f"❌ Failed to get user info from database: {e}")
         return None
 
-# Startup event to test MongoDB connection
+# Cleanup and monitoring tasks
+async def cleanup_finished_games():
+    """Remove finished games from memory periodically"""
+    while True:
+        try:
+            await asyncio.sleep(300)  # Run every 5 minutes
+            
+            finished_games = []
+            current_time = datetime.now()
+            
+            for game_code, game in list(active_games.items()):
+                if game.status == GameStatus.FINISHED:
+                    # Keep finished games for 2 hours, then remove from memory
+                    if game.finished_at:
+                        if (current_time - game.finished_at).total_seconds() > 7200:  # 2 hours
+                            finished_games.append(game_code)
+                    else:
+                        # Add finished timestamp if not present
+                        game.finished_at = current_time
+                        active_games[game_code] = game
+                        await save_game_to_db(game)
+            
+            for game_code in finished_games:
+                del active_games[game_code]
+                print(f"🧹 Cleaned up finished game {game_code} from memory")
+                
+        except Exception as e:
+            print(f"❌ Error in cleanup task: {e}")
+
+# Startup event to test MongoDB connection and load games
 @app.on_event("startup")
 async def startup_event():
-    """Test MongoDB connection on startup"""
+    """Test MongoDB connection and load active games on startup"""
     mongodb_ok = await test_mongodb_connection()
     if not mongodb_ok:
         print("⚠️ Server starting without MongoDB connection - some features may not work")
+        return
+    
+    # Load all active games from database into memory
+    try:
+        active_games_cursor = db.games.find({
+            "status": {"$in": ["waiting", "started", "question", "results"]}
+        })
+        loaded_games = await active_games_cursor.to_list(length=None)
+        
+        for game_data in loaded_games:
+            game = Game(**game_data)
+            active_games[game.code] = game
+            print(f"🔄 Loaded active game {game.code} into memory")
+        
+        print(f"✅ Loaded {len(loaded_games)} active games into memory")
+        
+        # Start cleanup task
+        asyncio.create_task(cleanup_finished_games())
+        
+    except Exception as e:
+        print(f"❌ Failed to load games from database: {e}")
+
+# Health check and monitoring endpoints
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for monitoring"""
+    try:
+        # Test database connection
+        await client.admin.command('ping')
+        
+        # Count active games and connections
+        active_game_count = len(active_games)
+        total_connections = sum(
+            len(connections) for connections in connection_manager.active_connections.values()
+        )
+        
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "active_games": active_game_count,
+            "total_websocket_connections": total_connections,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+@app.get("/admin/stats")
+async def get_stats():
+    """Get system statistics (for admin monitoring)"""
+    try:
+        # Game statistics
+        game_stats = {}
+        for status in GameStatus:
+            game_stats[status.value] = len([
+                g for g in active_games.values() if g.status == status
+            ])
+        
+        # Database statistics
+        db_stats = {
+            "total_games": await db.games.count_documents({}),
+            "total_users": await db.user_info.count_documents({}),
+            "total_submissions": await db.user_submissions.count_documents({})
+        }
+        
+        # Connection statistics
+        conn_stats = connection_manager.get_stats()
+        
+        return {
+            "games": game_stats,
+            "database": db_stats,
+            "connections": conn_stats,
+            "memory_usage": {
+                "active_games_in_memory": len(active_games)
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get stats: {e}")
 
 # API Routes
 
@@ -404,7 +570,7 @@ async def create_quiz(quiz: Quiz):
 @app.post("/join-game/{game_code}")
 async def join_game(game_code: str, request: JoinGameRequest):
     try:
-        game = active_games.get(game_code) or await get_game_from_db(game_code)
+        game = await ensure_game_in_memory(game_code)
         
         if not game:
             raise HTTPException(status_code=404, detail="Game not found")
@@ -439,7 +605,7 @@ async def join_game(game_code: str, request: JoinGameRequest):
                     "name": player_user_info.name
                 })
 
-        await broadcast_to_game(game_code, {
+        await safe_broadcast_to_game(game_code, {
             "type": "player_joined",
             "players": players_in_game,
             "total_players": len(players_in_game)
@@ -458,7 +624,7 @@ async def join_game(game_code: str, request: JoinGameRequest):
 @app.post("/start-game/{game_code}")
 async def start_game(game_code: str):
     try:
-        game = active_games.get(game_code) or await get_game_from_db(game_code)
+        game = await ensure_game_in_memory(game_code)
         
         if not game:
             raise HTTPException(status_code=404, detail="Game not found")
@@ -480,14 +646,14 @@ async def start_game(game_code: str):
         await save_game_to_db(game)
         
         # Robust broadcast with verification
-        await broadcast_to_game(game_code, {
+        await safe_broadcast_to_game(game_code, {
             "type": "game_started",
             "message": "Game is starting!",
             "timestamp": datetime.now().isoformat()
         })
         
         # Wait a bit to ensure message is delivered
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
         
         asyncio.create_task(start_question(game_code, 0))
         
@@ -502,7 +668,7 @@ async def start_question(game_code: str, question_index: int):
     print(f"🎯 Starting question {question_index + 1} for game {game_code}")
     await asyncio.sleep(3)
     
-    game = active_games.get(game_code)
+    game = await ensure_game_in_memory(game_code)
     if not game or game.status == GameStatus.FINISHED:
         return
     
@@ -531,16 +697,19 @@ async def start_question(game_code: str, question_index: int):
     }
     
     print(f"📡 Broadcasting question {question_index + 1} for game {game_code}")
-    await broadcast_to_game(game_code, question_message)
+    success = await safe_broadcast_to_game(game_code, question_message)
+    
+    if not success:
+        print(f"⚠️ Failed to broadcast question, but continuing...")
     
     # Wait to ensure message delivery before starting timer
-    await asyncio.sleep(2)
+    await asyncio.sleep(3)
     
     # Start the next question or end game timer
     asyncio.create_task(proceed_to_next_question(game_code, question_index))
 
 async def proceed_to_next_question(game_code: str, question_index: int):
-    game = active_games.get(game_code)
+    game = await ensure_game_in_memory(game_code)
     if not game:
         return
     
@@ -549,7 +718,8 @@ async def proceed_to_next_question(game_code: str, question_index: int):
     print(f"⏳ Waiting {question_obj.time_limit} seconds for question {question_index + 1} in game {game_code}")
     await asyncio.sleep(question_obj.time_limit)
     
-    game = active_games.get(game_code)
+    # Re-check game state after waiting
+    game = await ensure_game_in_memory(game_code)
     if not game or game.current_question != question_index:
         return
     
@@ -558,8 +728,8 @@ async def proceed_to_next_question(game_code: str, question_index: int):
     active_games[game_code] = game
     await save_game_to_db(game)
     
-    # Broadcast the correct answer (without leaderboard)
-    await broadcast_to_game(game_code, {
+    # Broadcast the correct answer
+    await safe_broadcast_to_game(game_code, {
         "type": "question_results",
         "question_id": question_obj.question_id,
         "correct_answer": question_obj.correct_answer,
@@ -581,11 +751,12 @@ async def proceed_to_next_question(game_code: str, question_index: int):
 async def end_game(game_code: str):
     await asyncio.sleep(2)
     
-    game = active_games.get(game_code)
+    game = await ensure_game_in_memory(game_code)
     if not game:
         return
     
     game.status = GameStatus.FINISHED
+    game.finished_at = datetime.now()
     active_games[game_code] = game
     await save_game_to_db(game)
     
@@ -606,7 +777,7 @@ async def end_game(game_code: str):
         final_leaderboard = sorted(final_leaderboard, key=lambda x: x["score"], reverse=True)
         
         # Broadcast final results with leaderboard
-        await broadcast_to_game(game_code, {
+        await safe_broadcast_to_game(game_code, {
             "type": "game_finished",
             "final_leaderboard": final_leaderboard,
             "timestamp": datetime.now().isoformat()
@@ -617,7 +788,7 @@ async def end_game(game_code: str):
 @app.post("/submit-answer/{game_code}/{player_id}")
 async def submit_answer(game_code: str, player_id: str, request: SubmitAnswerRequest):
     try:
-        game = active_games.get(game_code)
+        game = await ensure_game_in_memory(game_code)
         if not game:
             raise HTTPException(status_code=404, detail="Game not found")
         
@@ -644,7 +815,7 @@ async def submit_answer(game_code: str, player_id: str, request: SubmitAnswerReq
             time_bonus = max(0, (question_obj.time_limit - answer_time) / question_obj.time_limit)
             score_to_add = int(max_score * time_bonus)
         else:
-            score_to_add = -100
+            score_to_add = 0
         
         new_user_answer = UserAnswer(
             question_id=question_obj.question_id,
@@ -663,7 +834,11 @@ async def submit_answer(game_code: str, player_id: str, request: SubmitAnswerReq
             upsert=True
         )
         
-        return {"message": "Answer submitted successfully", "score_added": score_to_add}
+        return {
+            "message": "Answer submitted successfully", 
+            "score_added": score_to_add,
+            "is_correct": is_correct
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -673,7 +848,7 @@ async def submit_answer(game_code: str, player_id: str, request: SubmitAnswerReq
 @app.get("/game-status/{game_code}")
 async def get_game_status(game_code: str):
     try:
-        game = active_games.get(game_code) or await get_game_from_db(game_code)
+        game = await ensure_game_in_memory(game_code)
         if not game:
             raise HTTPException(status_code=404, detail="Game not found")
         
@@ -691,20 +866,72 @@ async def get_game_status(game_code: str):
         print(f"❌ Error getting game status: {e}")
         raise HTTPException(status_code=500, detail="Failed to get game status")
 
-# Bulletproof WebSocket endpoint
+@app.post("/admin/recover-game/{game_code}")
+async def recover_game(game_code: str):
+    """Manually recover a game that might be stuck"""
+    try:
+        game = await get_game_from_db(game_code)
+        if not game:
+            raise HTTPException(status_code=404, detail="Game not found in database")
+        
+        # Force reload into memory
+        active_games[game_code] = game
+        
+        # Get current connections
+        connection_count = connection_manager.get_connection_count(game_code)
+        
+        # Broadcast current state to all connections
+        await safe_broadcast_to_game(game_code, {
+            "type": "game_recovered",
+            "current_status": game.status,
+            "current_question": game.current_question,
+            "message": "Game state has been recovered",
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        return {
+            "message": "Game recovered successfully",
+            "game_status": game.status,
+            "connections": connection_count
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error recovering game: {e}")
+        raise HTTPException(status_code=500, detail="Failed to recover game")
+
+# Bulletproof WebSocket endpoint with aggressive reconnection support
 @app.websocket("/ws/{game_code}")
 async def websocket_endpoint(websocket: WebSocket, game_code: str):
     player_id = None
     
     try:
+        # Ensure game is loaded before connecting
+        game = await ensure_game_in_memory(game_code)
+        if not game:
+            await websocket.close(code=1008, reason="Game not found")
+            return
+            
         # Connect with full error handling
         await connection_manager.connect(websocket, game_code)
+        
+        # Send immediate welcome message
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "welcome",
+                "message": "Connected to game successfully",
+                "game_code": game_code,
+                "game_status": game.status,
+                "timestamp": datetime.now().isoformat()
+            }))
+        except:
+            pass
         
         # Message handling loop with robust error recovery
         while True:
             try:
-                # Wait for message with timeout
-                data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+                # Wait for message with longer timeout for stability
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=90.0)
                 message = json.loads(data)
                 
                 # Handle different message types
@@ -716,31 +943,95 @@ async def websocket_endpoint(websocket: WebSocket, game_code: str):
                         break
                         
                 elif message.get("type") == "heartbeat":
-                    # Update last ping time
+                    # Update last ping time and respond
                     if websocket in connection_manager.connection_metadata:
                         connection_manager.connection_metadata[websocket]["last_ping"] = datetime.now()
+                    try:
+                        await websocket.send_text(json.dumps({"type": "heartbeat_ack"}))
+                    except:
+                        pass
                         
                 elif message.get("type") == "host_connected":
-                    game = active_games.get(game_code)
+                    game = await ensure_game_in_memory(game_code)
                     if game:
                         game.host_connected = True
                         active_games[game_code] = game
+                        print(f"🎮 Host connected to game {game_code}")
                         
                 elif message.get("type") == "player_connected":
                     player_id = message.get('player_id')
                     if websocket in connection_manager.connection_metadata:
                         connection_manager.connection_metadata[websocket]["player_id"] = player_id
-                    print(f"Player {player_id} connected to game {game_code}")
+                    print(f"👤 Player {player_id} connected to game {game_code}")
                     
-                    # Send immediate confirmation
+                    # Send immediate confirmation with current game state
                     try:
-                        await websocket.send_text(json.dumps({
+                        current_game = await ensure_game_in_memory(game_code)
+                        confirmation = {
                             "type": "connection_confirmed",
                             "message": "Successfully connected to game",
-                            "game_code": game_code
-                        }))
+                            "game_code": game_code,
+                            "player_id": player_id
+                        }
+                        
+                        # Include current question if game is in progress
+                        if current_game and current_game.status == GameStatus.QUESTION:
+                            current_question = current_game.quiz.questions[current_game.current_question]
+                            time_elapsed = 0
+                            if current_game.question_start_time:
+                                time_elapsed = (datetime.now() - current_game.question_start_time).total_seconds()
+                            
+                            confirmation.update({
+                                "current_question": {
+                                    "type": "question",
+                                    "question_number": current_game.current_question + 1,
+                                    "total_questions": len(current_game.quiz.questions),
+                                    "question_id": current_question.question_id,
+                                    "question": current_question.question,
+                                    "options": current_question.options,
+                                    "time_limit": current_question.time_limit,
+                                    "correct_answer": current_question.correct_answer,
+                                    "time_elapsed": int(time_elapsed),
+                                    "timestamp": datetime.now().isoformat()
+                                }
+                            })
+                        
+                        await websocket.send_text(json.dumps(confirmation))
                     except Exception as e:
                         print(f"Failed to send confirmation: {e}")
+                        
+                elif message.get("type") == "request_game_state":
+                    # Client requesting current game state (for reconnection)
+                    try:
+                        current_game = await ensure_game_in_memory(game_code)
+                        if current_game:
+                            state_message = {
+                                "type": "game_state",
+                                "status": current_game.status,
+                                "current_question": current_game.current_question,
+                                "total_questions": len(current_game.quiz.questions)
+                            }
+                            
+                            # If there's an active question, include it
+                            if current_game.status == GameStatus.QUESTION:
+                                current_question = current_game.quiz.questions[current_game.current_question]
+                                time_elapsed = 0
+                                if current_game.question_start_time:
+                                    time_elapsed = (datetime.now() - current_game.question_start_time).total_seconds()
+                                
+                                state_message["active_question"] = {
+                                    "question_number": current_game.current_question + 1,
+                                    "question_id": current_question.question_id,
+                                    "question": current_question.question,
+                                    "options": current_question.options,
+                                    "time_limit": current_question.time_limit,
+                                    "correct_answer": current_question.correct_answer,
+                                    "time_elapsed": int(time_elapsed)
+                                }
+                            
+                            await websocket.send_text(json.dumps(state_message))
+                    except Exception as e:
+                        print(f"Failed to send game state: {e}")
                 
             except asyncio.TimeoutError:
                 # Timeout is normal - continue loop
