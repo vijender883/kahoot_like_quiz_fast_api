@@ -111,6 +111,16 @@ class SubmitAnswerRequest(BaseModel):
     submitter_answer: int
     time_taken: float
 
+class UserRegistrationRequest(BaseModel):
+    name: str
+    email_id: str
+    phone_no: str
+
+class UserRegistrationResponse(BaseModel):
+    message: str
+    name: str
+    player_id: str
+
 # Enhanced connection tracking
 class ConnectionManager:
     def __init__(self):
@@ -307,7 +317,56 @@ async def validate_user(request: UserValidationRequest):
     except Exception as e:
         print(f"❌ Error validating user: {e}")
         raise HTTPException(status_code=500, detail="Database operation failed")
-
+    
+@app.post("/register-user", response_model=UserRegistrationResponse)
+async def register_user(request: UserRegistrationRequest):
+    try:
+        # Check if user already exists with this email
+        existing_user = await db.user_info.find_one({"email_id": request.email_id})
+        
+        if existing_user:
+            raise HTTPException(status_code=400, detail="User with this email already exists")
+        
+        # Validate input data
+        if not request.name.strip():
+            raise HTTPException(status_code=400, detail="Name is required")
+        
+        if not request.email_id.strip() or "@" not in request.email_id:
+            raise HTTPException(status_code=400, detail="Valid email is required")
+        
+        if not request.phone_no.strip():
+            raise HTTPException(status_code=400, detail="Phone number is required")
+        
+        # Generate a new player_id
+        player_id = str(uuid.uuid4())
+        
+        # Create new user document
+        new_user = {
+            "name": request.name.strip(),
+            "email_id": request.email_id.strip().lower(),
+            "phone_no": request.phone_no.strip(),
+            "player_id": player_id,
+            "created_at": datetime.now()
+        }
+        
+        # Insert new user into database
+        result = await db.user_info.insert_one(new_user)
+        
+        if not result.inserted_id:
+            raise HTTPException(status_code=500, detail="Failed to create user")
+        
+        return UserRegistrationResponse(
+            message="User registered successfully",
+            name=request.name.strip(),
+            player_id=player_id
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error registering user: {e}")
+        raise HTTPException(status_code=500, detail="Database operation failed")
+    
 @app.post("/create-quiz")
 async def create_quiz(quiz: Quiz):
     try:
