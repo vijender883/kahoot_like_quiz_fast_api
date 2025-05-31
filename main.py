@@ -583,6 +583,8 @@ async def submit_answer(game_code: str, player_id: str, request: SubmitAnswerReq
         if is_correct:
             time_bonus = max(0, (question_obj.time_limit - answer_time) / question_obj.time_limit)
             score_to_add = int(max_score * time_bonus)
+        else:
+            score_to_add = 0  # No negative scoring
         
         new_user_answer = UserAnswer(
             question_id=question_obj.question_id,
@@ -658,7 +660,7 @@ async def websocket_endpoint(websocket: WebSocket, game_code: str):
         while True:
             try:
                 data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
-                message = json.parse(data)
+                message = json.loads(data)
                 
                 if message.get("type") == "ping":
                     await websocket.send_text(json.dumps({"type": "pong"}))
