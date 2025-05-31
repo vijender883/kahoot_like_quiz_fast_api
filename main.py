@@ -793,14 +793,24 @@ async def submit_answer(game_code: str, player_id: str, request: SubmitAnswerReq
             raise HTTPException(status_code=404, detail="Game not found")
         
         if game.status != GameStatus.QUESTION:
-            raise HTTPException(status_code=400, detail="Not accepting answers right now")
+            raise HTTPException(status_code=400, detail=f"Not accepting answers. Game status: {game.status}")
+        
+        # Check if question time has expired
+        if game.question_start_time:
+            question_obj = game.quiz.questions[game.current_question]
+            time_elapsed = (datetime.now() - game.question_start_time).total_seconds()
+            if time_elapsed > question_obj.time_limit:
+                raise HTTPException(status_code=400, detail="Time limit exceeded for this question")
         
         question_index = game.current_question
+        if question_index >= len(game.quiz.questions):
+            raise HTTPException(status_code=400, detail="Invalid question index")
+            
         question_obj = game.quiz.questions[question_index]
         
         user_submission = await get_user_submission_from_db(game_code, player_id)
         if not user_submission:
-            raise HTTPException(status_code=404, detail="Player submission not found. Please join the game first.")
+            raise HTTPException(status_code=404, detail="Player not found. Please rejoin the game.")
         
         if question_obj.question_id in user_submission.answers:
             raise HTTPException(status_code=400, detail="Answer already submitted for this question")
@@ -815,7 +825,7 @@ async def submit_answer(game_code: str, player_id: str, request: SubmitAnswerReq
             time_bonus = max(0, (question_obj.time_limit - answer_time) / question_obj.time_limit)
             score_to_add = int(max_score * time_bonus)
         else:
-            score_to_add = 0
+            score_to_add = -100
         
         new_user_answer = UserAnswer(
             question_id=question_obj.question_id,
