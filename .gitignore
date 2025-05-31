@@ -19,3 +19,6 @@ add_dummy_user_info_to_mongodb.py
 # OS-specific files
 .DS_Store
 Thumbs.db
+
+# user data files
+registered_users.csv
